@@ -22,13 +22,26 @@ extension StoreKit.Product {
         } else {
             throw AdaptyError.cantMakePayments()
         }
-        #elseif (os(iOS) || os(tvOS)) && compiler(>=6.0.3)
-        if #available(iOS 18.2, tvOS 18.2, *),
-           let viewController = UIApplication.shared.topPresentedController
-        {
-            try await purchase(confirmIn: viewController, options: options)
+        #elseif os(iOS) || os(tvOS)
+        // appkit fork: from iOS 17 the purchase is ALWAYS anchored to a scene.
+        // Upstream anchors it to the top view controller of the key window of a
+        // `.foregroundActive` scene and otherwise falls back to the scene-less
+        // `purchase(options:)`. A purchase started while the scene is only
+        // `.foregroundInactive` (a system alert or sheet over the app, an iPhone
+        // app in iPad compatibility mode) took that fallback, and on iOS 27
+        // StoreKit then logs "Could not find a UI anchor" and throws before the
+        // payment sheet appears (AdaptyError 1006). A scene in any state is a
+        // valid anchor, so it is looked up in order of preference, and without
+        // one the purchase is refused rather than started blind (the same rule
+        // the visionOS branch above applies).
+        // Upstream issue: https://github.com/adaptyteam/AdaptySDK-iOS/issues/183
+        if #available(iOS 17.0, tvOS 17.0, *) {
+            guard let scene = UIApplication.shared.purchaseConfirmationScene else {
+                throw AdaptyError.cantMakePayments()
+            }
+            return try await purchase(confirmIn: scene, options: options)
         } else {
-            try await purchase(options: options)
+            return try await purchase(options: options)
         }
         #else
         try await purchase(options: options)
@@ -44,6 +57,15 @@ extension UIApplication {
         connectedScenes
             .compactMap { $0 as? UIWindowScene }
             .first(where: { $0.activationState == .foregroundActive })
+    }
+
+    /// The scene to confirm a purchase in (appkit fork): the active scene, else
+    /// an inactive one in the foreground, else any connected window scene.
+    var purchaseConfirmationScene: UIWindowScene? {
+        let scenes = connectedScenes.compactMap { $0 as? UIWindowScene }
+        return scenes.first { $0.activationState == .foregroundActive }
+            ?? scenes.first { $0.activationState == .foregroundInactive }
+            ?? scenes.first
     }
 
     /// Returns the top-most presented view controller starting from the root of the key window.
